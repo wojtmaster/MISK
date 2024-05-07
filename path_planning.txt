@@ -1,0 +1,338 @@
+--lua
+
+sim=require'sim'
+simOMPL=require'simOMPL'
+
+function sysCall_init()
+    robotHandle=sim.getObject('.')
+    refHandle=sim.getObject('./ref')
+    leftMotorHandle=sim.getObject('./leftMotor')
+    rightMotorHandle=sim.getObject('./rightMotor')
+    collVolumeHandle=sim.getObject('./coll')
+    firstTargetHandle=sim.getObject('./firstTarget')
+    secondTargetHandle=sim.getObject('./secondTarget')
+    thirdTargetHandle=sim.getObject('./thirdTarget')
+    baseHandle=sim.getObject('../base')
+    
+    -- Tworzy kolekcje z przeszkod (potrzebne do obliczen)
+    robotObstaclesCollection=sim.createCollection(0)
+    -- Dodaje wszystkie obiekty do kolekcji i ustawia na statyczne - 0
+    sim.addItemToCollection(robotObstaclesCollection,sim.handle_all,-1,0)
+    -- Dodaje robota, ale ustawia go na obiekt dynamiczny - 1
+    sim.addItemToCollection(robotObstaclesCollection,sim.handle_tree,robotHandle,1)
+    -- Tablica do stwierdzenia kolizji
+    collPairs={collVolumeHandle,robotObstaclesCollection}
+    -- Tutaj cos rozlacza i laczy robot z tagetem, ogolnie potrzebne
+    sim.setObjectParent(firstTargetHandle,-1,true)
+    sim.setObjectParent(secondTargetHandle,-1,true)
+    sim.setObjectParent(thirdTargetHandle,-1,true)
+    
+    -- Ustawia robota w bazie
+    local initialPosition = {-2.25, 2.25, 0.1}
+    local initialOrientation = {0.0, -89.0, 0.0}
+    sim.setObjectPosition(robotHandle, -1, initialPosition)
+    sim.setObjectOrientation(robotHandle, -1, initialOrientation)
+    
+    sim.pauseSimulation()
+
+    -- Ustawia predkosc robota na 180 deg/s i zamienia na rad/s
+    velocity=540*math.pi/180
+    -- Ustawia obszar wyszukiwanai w kierunkach x i y
+    searchRange=5
+    -- Czas trwania poszukiwan podczas kazdego przejscia algorytmu
+    searchDuration=0.1
+    -- Wybor algorytmu BiTTRT do planowania sciezki
+    searchAlgo=simOMPL.Algorithm.BiTRRT
+    -- Pokazuje target przez caly okres symulacji
+    showRealTarget=true
+    -- Pokazuje pozycje robota
+    showTrackPos=true
+    -- Ustawienie odstepu miedzy przeszkoda a robotem, im mniejsze tym robot bedzie jechal blizej scian
+    clearanceRadius=0.2
+    -- Ustawia obwiednie (bounding box) reprezentujaca przestrzen kolizji X x Y x Z
+    sim.setShapeBB(collVolumeHandle,{clearanceRadius*2,clearanceRadius*2,0.15})
+    -- Tryb krokowy symulacji
+    sim.setStepping(true)
+end
+ 
+-- Po zakonczeniu symulacji dolacza target jako potomek robota
+function sysCall_cleanup() 
+    sim.setObjectParent(firstTargetHandle,robotHandle,true)
+    sim.setObjectParent(secondTargetHandle,robotHandle,true)
+    sim.setObjectParent(thirdTargetHandle,robotHandle,true)
+end
+
+-- Funkcja, ktora sluzy do sprawdzania, czy w danym miejscu (pos) wystepuje kolizja 
+function checkCollidesAt(pos)
+    -- Zapamietaj aktualna pozycje przestrzeni kolizji
+    local tmp=sim.getObjectPosition(collVolumeHandle)
+    -- Ustaw przestrzen kolizji w nowej pozycji
+    sim.setObjectPosition(collVolumeHandle,pos)
+    -- Sprawdz kolizje miedzy obiektami
+    local r=sim.checkCollision(collPairs[1],collPairs[2])
+    -- Przywroc pierwotna pozycje przestrzeni kolizji
+    sim.setObjectPosition(collVolumeHandle,tmp)
+    -- Zwroc true, jesli wystepuje kolizja, w przeciwnym razie false
+    -- Zmienilem na == z >0
+    return r==1
+end
+
+-- Funkcja sluzaca do pobierania pozycji docelowej
+function getTargetPosition(target)
+    -- Dodajemy troche opoznienia
+    -- Pobiera dane dotyczace targetu i zapisuje do wektora
+    local p=Vector3(sim.getObjectPosition(target))
+    -- Zapisuje lokalny czas symulacji do zmiennej t
+    local t=sim.getSystemTime()
+    -- Jesli poprzednia pozycja docelowa nie zostala ustalona, ustaw biezaca jako poprzednia stabilna
+    if prevTargetPosStable==nil then
+        prevTargetPosStable=p
+        prevTargetPos=p
+        prevTimeDiff=t
+    end
+    -- Jesli od poprzedniej pozycji docelowej r?zni sie o wiecej niz 0.01, zaktualizuj czas
+    if (prevTargetPos-p):norm()>0.01 then
+        prevTimeDiff=t
+    end
+    prevTargetPos=p
+    -- Jesli czas miedzy biezacym czasem a czasem ostatniej aktualizacji przekracza 0.25 sekundy, ustaw biezaca pozycje jako poprzednia stabilna
+    if sim.getSystemTime()-prevTimeDiff>0.25 then
+        prevTargetPosStable=p
+    end
+    -- Zwr?c poprzednia pozycje stabilna jako dane (np. jako tablice)
+    return prevTargetPosStable:data()
+end
+
+-- Funkcja sluzaca do wizualizacji wyznaczonej sciezki 
+function visualizePath(path)
+    -- Jesli kontener linii nie istnieje, utworz go
+    if not _lineContainer then
+    -- Ustwienia linii
+    -- 3 - szerokosc linii
+    -- 0 - identyfikator, dla 0 Coppelia sama nadaje
+    -- -1 - warstwa, dla -1 rysuje na wszystkich
+    -- 99999 - priorytet, jesli duzo to linia bedzie rysowana na wierzchu innych obiektow
+    -- {0.2,0.2,0.2} - rgb
+        _lineContainer=sim.addDrawingObject(sim.drawing_lines,3,0,-1,99999,{0.2,0.2,0.2})
+    end
+    -- Usun wszystkie linie z kontenera
+    sim.addDrawingObjectItem(_lineContainer,nil)
+    -- Jesli sciezka istnieje, dodaj linie reprezentujaca kazdy odcinek sciezki do kontenera linii
+    if path then
+        for i=1,(#path/2)-1,1 do
+            local lineDat={path[(i-1)*2+1],path[(i-1)*2+2],0.001,path[i*2+1],path[i*2+2],0.001}
+            sim.addDrawingObjectItem(_lineContainer,lineDat)
+        end
+    end
+end
+
+function sysCall_thread()
+    while true do
+    -- Wybór targetu do którego podjezdza robot
+    local target
+    local liczba = math.random(1,3);
+    if liczba == 1 then
+        target = firstTargetHandle
+    elseif liczba == 2 then
+        target = secondTargetHandle
+    else
+        target = thirdTargetHandle
+    end
+        -- Upewniamy sie, ze objetosc kolizji robota nie zaczyna sie w stanie kolizji:
+        --[[while checkCollidesAt(sim.getObjectPosition(refHandle)) do
+            -- Pobieramy pozycje poczatkowa (sp) i docelowa (gp)
+            local sp=Vector3(sim.getObjectPosition(refHandle))
+            local gp=Vector3(getTargetPosition(target))
+            -- Obliczamy wektor kierunku (dx) i odleglosc (l) miedzy punktami sp i gp
+            -- Wartosc znormlaizowana --> (0,1)
+            local dx=(gp-sp):normalized()
+            -- Oblicza norme wektora
+            local l=(gp-sp):norm()
+            -- Jesli odleglosc jest wieksza niz 0.1, poruszamy obiekt (BillHandle) w kierunku celu
+            if l>0.1 then
+                sp=sp+dx*sim.getSimulationTimeStep()*velocity
+                sim.setObjectPosition(BillHandle,sp:data())
+                -- Ustawiamy orientacje obiektu
+                -- 0,0 wskazuje na brak obrotu wokol osi X i Y
+                sim.setObjectOrientation(BillHandle,{0,0,math.atan2(dx[2],dx[1])})
+            end
+            -- Wykonujemy krok symulacji
+            sim.step()
+        end--]]
+        
+        -- Pobiera pozycje robota
+        local sp=Vector3(sim.getObjectPosition(refHandle))
+        -- Pobiera pozycje docelowa
+        local gp=Vector3(getTargetPosition(target))
+        -- Kopia pozycji docelowej
+        local ogp=Vector3(getTargetPosition(target))
+        -- Oblicza odl. miedzy poz. robota a poz. docelowa
+        local l=(gp-sp):norm()
+        -- Inicjalizacja zmiennej ngo
+        local ngo
+        
+        -- OGOLNIE TEN FRAGMENT JEST ODPOWIEDZIALNY ZA WYKRYWANIE BLEDOW (NP. CEL W SCIANIE)
+        -- Funkcja wykonuje sie jesli miejsce docelowe jest w stanie kolizji lub jest niemozliwe do osiagniecia
+        --[[while l>0.1 and (l>searchRange or checkCollidesAt(gp:data())) do
+            -- Oblicza wektor kierunku (znormalizowany)
+            local dx=(sp-gp):normalized()
+            -- Oblicza odl. miedzy poz. robota a docelowa
+            l=(gp-sp):norm()
+            -- Przesuwa poz. docelowa o 0.09 w kierunku przeciwnym do wektora od gp do sp
+            gp=gp+dx*0.09
+            -- Jesli pozycja jest osiagalna ustawia ngo na true
+            if showRealTarget then
+                ngo=true
+            end
+        end
+        if ngo then
+            -- Tworzy kopie celu (kopiuje tylko jeden obiekt)
+            ngo=sim.copyPasteObjects({target},1)[1]
+            -- Pobiera wszystkie ksztalty zawarte w kopii obiektu celu
+            local s=sim.getObjectsInTree(ngo,sim.object_shape_type)
+            for i=1,#s,1 do
+                -- Iteruje po wszystkich elementach graficznych i ustawia je na kolor czerwony
+                sim.setShapeColor(s[i],nil,sim.colorcomponent_ambient_diffuse,{1,0,0})
+            end
+            -- Ustawia pozycje kopii obiektu na pozycje docelowa
+            sim.setObjectPosition(ngo,gp:data())
+        end
+        -- TU SIE KONCZY --]]
+        
+        -- Sprawdza czy odl. > 0.1 i czy nie ma kolizji
+        if l>0.1 and not checkCollidesAt(gp:data()) then
+            -- Tworzy nowe zadanie planowania trajektorii
+            local t=simOMPL.createTask('t')
+            -- Ustawia algorytm dla zadania t (czyli BiTTRT)
+            simOMPL.setAlgorithm(t,searchAlgo)
+            -- Tworzy przestrzen stanow na searchRange
+            local ss={simOMPL.createStateSpace('2d',simOMPL.StateSpaceType.position2d,collVolumeHandle,{sp[1]-searchRange,sp[2]-searchRange},{sp[1]+searchRange,sp[2]+searchRange},1)}
+            -- Ustawia przestrzen stanow dla zadania t
+            simOMPL.setStateSpace(t,ss)
+            -- Ustawia pary kolidujace dla zadania t
+            simOMPL.setCollisionPairs(t,collPairs)
+            -- Ustawia stan poczatkowy
+            simOMPL.setStartState(t,{sp:data()[1],sp:data()[2]})
+            -- Ustawia stan koncowy
+            simOMPL.setGoalState(t,{gp:data()[1],gp:data()[2]})
+            -- Ustawia rozdzielczosc sprawdzania poprawnosci stanu dla zadania t
+            simOMPL.setStateValidityCheckingResolution(t,0.001)
+            -- Setup
+            simOMPL.setup(t)
+            
+            local path
+            -- Petla wyonuje sie dopoki sciezka nie zostanie znaleziona
+            while path==nil do
+                -- Sprawdza czy udalo sie rozwiazac zadania t
+                if simOMPL.solve(t,searchDuration) then
+                    sim.step()
+                    -- Upraszacza znaleziona sciezke
+                    simOMPL.simplifyPath(t,searchDuration)
+                    sim.step()
+                    -- Pobiera znaleziona sciezke i zapisuje do zmiennej path
+                    path=simOMPL.getPath(t)
+                    -- Funckja rysujaca sciezke
+                    visualizePath(path)
+                end
+                
+                sim.step()
+                
+                -- Pobiera nowa pozycje docelowa
+                local gp2=Vector3(getTargetPosition(target))
+                local l=(gp2-ogp):norm()
+                -- Jesli cel zostal przesuniety, to zatrzymuje algorytm
+                if l>0.1 then -- the goal was moved
+                    break
+                end
+            end
+            
+            -- Przetwarza znaleziona sciezke, zeby mozna ja bylo wykorzystac w pozniejszych operacjach
+            if path then
+                local tmp=path
+                path={}
+                for i=0,#tmp/2-1,1 do
+                    path[#path+1]=tmp[2*i+1]
+                    path[#path+1]=tmp[2*i+2]
+                    path[#path+1]=0.0
+                end
+                
+                -- Cos do sledzenia pozycji, ogolnie roznicy nie robi, ale potrzebne
+                local trackPosCont
+                if showTrackPos then
+                    trackPosCont=sim.addDrawingObject(sim.drawing_spherepts|sim.drawing_cyclic,0.02,0,-1,1,{1,0,1})
+                end
+                --sim.pauseSimulation()
+                -- Funkcja sterujaca
+                local prevL=0
+                while true do
+                    -- Oblicza dlugosc odcinkow na sciezce i cala odleglosc do pokonania
+                    local pathLengths,totalDist=sim.getPathLengths(path,3)
+                    -- Oblicza najblizszy punkt na sciezce wzgledem aktualnej pozycji robota
+                    local l=sim.getClosestPosOnPath(path,pathLengths,sim.getObjectPosition(refHandle))
+                    -- Sprawdza czy idzie w dobrym kierunku
+                    if l<=prevL then
+                        l=l+totalDist/200
+                    end
+                    prevL=l
+                    -- Interpoluje pozycje robota na sciezce
+                    local p=sim.getPathInterpolatedConfig(path,pathLengths,l)
+                    -- Sprawdza, czy istnieje obiekt wizualizacji pozycji sledzenia (trackPosCont) -> jesli tak dodaje nowa pozycje p do wizualizacji
+                    if trackPosCont then
+                        sim.addDrawingObjectItem(trackPosCont,p)
+                    end
+                    
+                    -- Pobiera macierz transformacji
+                    local m=sim.getObjectMatrix(refHandle)
+                    -- Oblicza odwrotnosc macierzy transformacji
+                    m=sim.getMatrixInverse(m)
+                    -- Przeksztalca punkt na sciezce robota do ukladu wspolrzednych robota
+                    p=sim.multiplyVector(m,p)
+                    -- Oblicza kat miedzy osia X a wektorem p
+                    local angle=math.atan2(p[2],p[1])
+                    -- Oblicza wartosci predkosci w zaleznosci od tego czy kat jest dodatni czy ujemny
+                    local leftV=1.0
+                    local rightV=1.0
+                    if angle>0.0 then
+                        leftV=1-8*angle/math.pi
+                        if leftV<-1 then
+                            leftV=-1
+                        end
+                    else
+                        rightV=1+8*angle/math.pi
+                        if rightV<-1 then
+                            rightV=-1
+                        end
+                    end
+                    -- Ustawia obliczone predkosci
+                    sim.setJointTargetVelocity(leftMotorHandle,leftV*velocity)
+                    sim.setJointTargetVelocity(rightMotorHandle,rightV*velocity)
+                    sim.step()
+                    
+                    -- Jesli robot znacznie przemiescil sie w kierunku targetu, to breakuje i oblicza nowa trajektorie
+                    local gp2=Vector3(getTargetPosition(target))
+                    local l=(gp2-ogp):norm()
+                    if l>0.1 then
+                        break
+                    end
+                    
+                    -- Jesli pozycja robota jest dostatecznie blisko celu mozna przerwac algorytm
+                    local pp=Vector3(sim.getObjectPosition(refHandle))
+                    local l=(gp2-pp):norm()
+                    if l<0.05 then
+                        break
+                    end
+                end
+                if trackPosCont then
+                    sim.removeDrawingObject(trackPosCont)
+                end
+            end
+            visualizePath()
+            sim.setJointTargetVelocity(leftMotorHandle,0.0)
+            sim.setJointTargetVelocity(rightMotorHandle,0.0)
+        end
+        if ngo then
+            sim.removeModel(ngo)
+        end
+        sim.step()
+    end
+end
