@@ -14,6 +14,11 @@ function sysCall_init()
     thirdTargetHandle=sim.getObject('./thirdTarget')
     baseHandle=sim.getObject('./base')
     
+    print('firstTarget = ', firstTargetHandle)
+    print('secondTarget = ', secondTargetHandle)
+    print('thirdTarget = ', thirdTargetHandle)
+    print('base = ', baseHandle)
+    
     -- Tworzy kolekcje z przeszkod (potrzebne do obliczen)
     robotObstaclesCollection=sim.createCollection(0)
     -- Dodaje wszystkie obiekty do kolekcji i ustawia na statyczne - 0
@@ -85,24 +90,7 @@ function getTargetPosition(target)
     -- Pobiera dane dotyczace targetu i zapisuje do wektora
     local p=Vector3(sim.getObjectPosition(target))
     -- Zapisuje lokalny czas symulacji do zmiennej t
-    local t=sim.getSystemTime()
-    -- Jesli poprzednia pozycja docelowa nie zostala ustalona, ustaw biezaca jako poprzednia stabilna
-    if prevTargetPosStable==nil then
-        prevTargetPosStable=p
-        prevTargetPos=p
-        prevTimeDiff=t
-    end
-    -- Jesli od poprzedniej pozycji docelowej r?zni sie o wiecej niz 0.01, zaktualizuj czas
-    if (prevTargetPos-p):norm()>0.01 then
-        prevTimeDiff=t
-    end
-    prevTargetPos=p
-    -- Jesli czas miedzy biezacym czasem a czasem ostatniej aktualizacji przekracza 0.25 sekundy, ustaw biezaca pozycje jako poprzednia stabilna
-    if sim.getSystemTime()-prevTimeDiff>0.25 then
-        prevTargetPosStable=p
-    end
-    -- Zwr?c poprzednia pozycje stabilna jako dane (np. jako tablice)
-    return prevTargetPosStable:data()
+    return p
 end
 
 -- Funkcja sluzaca do wizualizacji wyznaczonej sciezki 
@@ -131,11 +119,13 @@ end
 function sysCall_thread()
     local target
     local state = 0
+    local prev_state = 0
+    local liczba
     while true do
     ---------------------------------------------------------------    
         if state == 0 then
             -- Wybor targetu do ktorego podjezdza robot
-            local liczba = math.random(1,3);
+            liczba = math.random(1,3)
             if liczba == 1 then
                 target = firstTargetHandle
             elseif liczba == 2 then
@@ -143,11 +133,13 @@ function sysCall_thread()
             else
                 target = thirdTargetHandle
             end
+            print('Jestem w state = 0, target:', target)
+            state = 1
         end
-        state = 1
     ---------------------------------------------------------------    
         if state == 1 then
-            -- Pobiera pozycje robota
+        print('Jestem w stanie 1, target:', target)
+        -- Pobiera pozycje robota
             local sp=Vector3(sim.getObjectPosition(refHandle))
             -- Pobiera pozycje docelowa
             local gp=Vector3(getTargetPosition(target))
@@ -157,6 +149,19 @@ function sysCall_thread()
             local l=(gp-sp):norm()
             -- Inicjalizacja zmiennej ngo
             local ngo
+            --
+            local basePosition = Vector3(sim.getObjectPosition(baseHandle))
+            local firstTargetPosition = Vector3(sim.getObjectPosition(firstTargetHandle))
+            local secondTargetPosition = Vector3(sim.getObjectPosition(secondTargetHandle))
+            local thirdTargetPosition = Vector3(sim.getObjectPosition(thirdTargetHandle))
+            print('l = ', l)
+            print('sp = ', sp)
+            print('gp = ', gp)
+            print('basePosition = ', basePosition)
+            print('firstTargetPosition = ',  firstTargetPosition)
+            print('secondTargetPosition = ',  secondTargetPosition)
+            print('thirdTargetPosition = ',  thirdTargetPosition)
+            
             
             -- Sprawdza czy odl. > 0.1 i czy nie ma kolizji
             if l>0.1 and not checkCollidesAt(gp:data()) then
@@ -178,7 +183,7 @@ function sysCall_thread()
                 simOMPL.setStateValidityCheckingResolution(t,0.001)
                 -- Setup
                 simOMPL.setup(t)
-                
+                print('zaplanowalem trase')
                 local path
                 -- Petla wyonuje sie dopoki sciezka nie zostanie znaleziona
                 while path==nil do
@@ -193,7 +198,7 @@ function sysCall_thread()
                         -- Funckja rysujaca sciezke
                         visualizePath(path)
                     end
-                    
+                    print('narysowalem trase')
                     sim.step()
                     
                     -- Pobiera nowa pozycje docelowa
@@ -280,6 +285,7 @@ function sysCall_thread()
                         if l<0.05 then
                             break
                         end
+                        print('przejechalem trase')
                     end
                     if trackPosCont then
                         sim.removeDrawingObject(trackPosCont)
@@ -289,19 +295,31 @@ function sysCall_thread()
                 sim.setJointTargetVelocity(leftMotorHandle,0.0)
                 sim.setJointTargetVelocity(rightMotorHandle,0.0)
             end
+            state = 2
         end
-        state = 2
         ---------------------------------------------------------------
         if ngo then
             sim.removeModel(ngo)
         end
         sim.step()
         sim.pauseSimulation()
-        if state == 2 and target ~= baseHandle
+
+        if state == 2 and prev_state == 0 then
+            print('Jestem w state 2')
             target = baseHandle
+            prev_state = state
             state = 1
-        else
+            print('prev_state = ', prev_state)
+            print('state = ', state)
+            print('target = ', target)
+        elseif state % 2 == 0 and prev_state ~= 0 then 
+            print('Jestem w state 3')
+            prev_state = 0
             state = 0
+            target = baseHandle
+            print('prev_state = ', prev_state)
+            print('state = ', state)
+            print('target = ', target)
         end
     end
 end
