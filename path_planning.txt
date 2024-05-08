@@ -132,6 +132,8 @@ function sysCall_thread()
     local target
     local state = 0
     while true do
+    ---------------------------------------------------------------    
+        if state == 0 then
             -- Wybor targetu do ktorego podjezdza robot
             local liczba = math.random(1,3);
             if liczba == 1 then
@@ -141,153 +143,165 @@ function sysCall_thread()
             else
                 target = thirdTargetHandle
             end
+        end
+        state = 1
+    ---------------------------------------------------------------    
+        if state == 1 then
+            -- Pobiera pozycje robota
+            local sp=Vector3(sim.getObjectPosition(refHandle))
+            -- Pobiera pozycje docelowa
+            local gp=Vector3(getTargetPosition(target))
+            -- Kopia pozycji docelowej
+            local ogp=Vector3(getTargetPosition(target))
+            -- Oblicza odl. miedzy poz. robota a poz. docelowa
+            local l=(gp-sp):norm()
+            -- Inicjalizacja zmiennej ngo
+            local ngo
+            
+            -- Sprawdza czy odl. > 0.1 i czy nie ma kolizji
+            if l>0.1 and not checkCollidesAt(gp:data()) then
+                -- Tworzy nowe zadanie planowania trajektorii
+                local t=simOMPL.createTask('t')
+                -- Ustawia algorytm dla zadania t (czyli BiTTRT)
+                simOMPL.setAlgorithm(t,searchAlgo)
+                -- Tworzy przestrzen stanow na searchRange
+                local ss={simOMPL.createStateSpace('2d',simOMPL.StateSpaceType.position2d,collVolumeHandle,{sp[1]-searchRange,sp[2]-searchRange},{sp[1]+searchRange,sp[2]+searchRange},1)}
+                -- Ustawia przestrzen stanow dla zadania t
+                simOMPL.setStateSpace(t,ss)
+                -- Ustawia pary kolidujace dla zadania t
+                simOMPL.setCollisionPairs(t,collPairs)
+                -- Ustawia stan poczatkowy
+                simOMPL.setStartState(t,{sp:data()[1],sp:data()[2]})
+                -- Ustawia stan koncowy
+                simOMPL.setGoalState(t,{gp:data()[1],gp:data()[2]})
+                -- Ustawia rozdzielczosc sprawdzania poprawnosci stanu dla zadania t
+                simOMPL.setStateValidityCheckingResolution(t,0.001)
+                -- Setup
+                simOMPL.setup(t)
                 
-                -- Pobiera pozycje robota
-                local sp=Vector3(sim.getObjectPosition(refHandle))
-                -- Pobiera pozycje docelowa
-                local gp=Vector3(getTargetPosition(target))
-                -- Kopia pozycji docelowej
-                local ogp=Vector3(getTargetPosition(target))
-                -- Oblicza odl. miedzy poz. robota a poz. docelowa
-                local l=(gp-sp):norm()
-                -- Inicjalizacja zmiennej ngo
-                local ngo
-                
-                -- Sprawdza czy odl. > 0.1 i czy nie ma kolizji
-                if l>0.1 and not checkCollidesAt(gp:data()) then
-                    -- Tworzy nowe zadanie planowania trajektorii
-                    local t=simOMPL.createTask('t')
-                    -- Ustawia algorytm dla zadania t (czyli BiTTRT)
-                    simOMPL.setAlgorithm(t,searchAlgo)
-                    -- Tworzy przestrzen stanow na searchRange
-                    local ss={simOMPL.createStateSpace('2d',simOMPL.StateSpaceType.position2d,collVolumeHandle,{sp[1]-searchRange,sp[2]-searchRange},{sp[1]+searchRange,sp[2]+searchRange},1)}
-                    -- Ustawia przestrzen stanow dla zadania t
-                    simOMPL.setStateSpace(t,ss)
-                    -- Ustawia pary kolidujace dla zadania t
-                    simOMPL.setCollisionPairs(t,collPairs)
-                    -- Ustawia stan poczatkowy
-                    simOMPL.setStartState(t,{sp:data()[1],sp:data()[2]})
-                    -- Ustawia stan koncowy
-                    simOMPL.setGoalState(t,{gp:data()[1],gp:data()[2]})
-                    -- Ustawia rozdzielczosc sprawdzania poprawnosci stanu dla zadania t
-                    simOMPL.setStateValidityCheckingResolution(t,0.001)
-                    -- Setup
-                    simOMPL.setup(t)
+                local path
+                -- Petla wyonuje sie dopoki sciezka nie zostanie znaleziona
+                while path==nil do
+                    -- Sprawdza czy udalo sie rozwiazac zadania t
+                    if simOMPL.solve(t,searchDuration) then
+                        sim.step()
+                        -- Upraszacza znaleziona sciezke
+                        simOMPL.simplifyPath(t,searchDuration)
+                        sim.step()
+                        -- Pobiera znaleziona sciezke i zapisuje do zmiennej path
+                        path=simOMPL.getPath(t)
+                        -- Funckja rysujaca sciezke
+                        visualizePath(path)
+                    end
                     
-                    local path
-                    -- Petla wyonuje sie dopoki sciezka nie zostanie znaleziona
-                    while path==nil do
-                        -- Sprawdza czy udalo sie rozwiazac zadania t
-                        if simOMPL.solve(t,searchDuration) then
-                            sim.step()
-                            -- Upraszacza znaleziona sciezke
-                            simOMPL.simplifyPath(t,searchDuration)
-                            sim.step()
-                            -- Pobiera znaleziona sciezke i zapisuje do zmiennej path
-                            path=simOMPL.getPath(t)
-                            -- Funckja rysujaca sciezke
-                            visualizePath(path)
+                    sim.step()
+                    
+                    -- Pobiera nowa pozycje docelowa
+                    local gp2=Vector3(getTargetPosition(target))
+                    local l=(gp2-ogp):norm()
+                    -- Jesli cel zostal przesuniety, to zatrzymuje algorytm
+                    if l>0.1 then -- the goal was moved
+                        break
+                    end
+                end
+                
+                -- Przetwarza znaleziona sciezke, zeby mozna ja bylo wykorzystac w pozniejszych operacjach
+                if path then
+                    local tmp=path
+                    path={}
+                    for i=0,#tmp/2-1,1 do
+                        path[#path+1]=tmp[2*i+1]
+                        path[#path+1]=tmp[2*i+2]
+                        path[#path+1]=0.0
+                    end
+                    
+                    -- Cos do sledzenia pozycji, ogolnie roznicy nie robi, ale potrzebne
+                    local trackPosCont
+                    if showTrackPos then
+                        trackPosCont=sim.addDrawingObject(sim.drawing_spherepts|sim.drawing_cyclic,0.02,0,-1,1,{1,0,1})
+                    end
+                    --sim.pauseSimulation()
+                    -- Funkcja sterujaca
+                    local prevL=0
+                    while true do
+                        -- Oblicza dlugosc odcinkow na sciezce i cala odleglosc do pokonania
+                        local pathLengths,totalDist=sim.getPathLengths(path,3)
+                        -- Oblicza najblizszy punkt na sciezce wzgledem aktualnej pozycji robota
+                        local l=sim.getClosestPosOnPath(path,pathLengths,sim.getObjectPosition(refHandle))
+                        -- Sprawdza czy idzie w dobrym kierunku
+                        if l<=prevL then
+                            l=l+totalDist/200
+                        end
+                        prevL=l
+                        -- Interpoluje pozycje robota na sciezce
+                        local p=sim.getPathInterpolatedConfig(path,pathLengths,l)
+                        -- Sprawdza, czy istnieje obiekt wizualizacji pozycji sledzenia (trackPosCont) -> jesli tak dodaje nowa pozycje p do wizualizacji
+                        if trackPosCont then
+                            sim.addDrawingObjectItem(trackPosCont,p)
                         end
                         
+                        -- Pobiera macierz transformacji
+                        local m=sim.getObjectMatrix(refHandle)
+                        -- Oblicza odwrotnosc macierzy transformacji
+                        m=sim.getMatrixInverse(m)
+                        -- Przeksztalca punkt na sciezce robota do ukladu wspolrzednych robota
+                        p=sim.multiplyVector(m,p)
+                        -- Oblicza kat miedzy osia X a wektorem p
+                        local angle=math.atan2(p[2],p[1])
+                        -- Oblicza wartosci predkosci w zaleznosci od tego czy kat jest dodatni czy ujemny
+                        local leftV=1.0
+                        local rightV=1.0
+                        if angle>0.0 then
+                            leftV=1-16*angle/math.pi
+                            if leftV<-1 then
+                                leftV=-1
+                            end
+                        else
+                            rightV=1+16*angle/math.pi
+                            if rightV<-1 then
+                                rightV=-1
+                            end
+                        end
+                        -- Ustawia obliczone predkosci
+                        sim.setJointTargetVelocity(leftMotorHandle,leftV*velocity)
+                        sim.setJointTargetVelocity(rightMotorHandle,rightV*velocity)
                         sim.step()
                         
-                        -- Pobiera nowa pozycje docelowa
+                        -- Jesli robot znacznie przemiescil sie w kierunku targetu, to breakuje i oblicza nowa trajektorie
                         local gp2=Vector3(getTargetPosition(target))
                         local l=(gp2-ogp):norm()
-                        -- Jesli cel zostal przesuniety, to zatrzymuje algorytm
-                        if l>0.1 then -- the goal was moved
+                        if l>0.1 then
+                            break
+                        end
+                        
+                        -- Jesli pozycja robota jest dostatecznie blisko celu mozna przerwac algorytm
+                        local pp=Vector3(sim.getObjectPosition(refHandle))
+                        local l=(gp2-pp):norm()
+                        if l<0.05 then
                             break
                         end
                     end
-                    
-                    -- Przetwarza znaleziona sciezke, zeby mozna ja bylo wykorzystac w pozniejszych operacjach
-                    if path then
-                        local tmp=path
-                        path={}
-                        for i=0,#tmp/2-1,1 do
-                            path[#path+1]=tmp[2*i+1]
-                            path[#path+1]=tmp[2*i+2]
-                            path[#path+1]=0.0
-                        end
-                        
-                        -- Cos do sledzenia pozycji, ogolnie roznicy nie robi, ale potrzebne
-                        local trackPosCont
-                        if showTrackPos then
-                            trackPosCont=sim.addDrawingObject(sim.drawing_spherepts|sim.drawing_cyclic,0.02,0,-1,1,{1,0,1})
-                        end
-                        --sim.pauseSimulation()
-                        -- Funkcja sterujaca
-                        local prevL=0
-                        while true do
-                            -- Oblicza dlugosc odcinkow na sciezce i cala odleglosc do pokonania
-                            local pathLengths,totalDist=sim.getPathLengths(path,3)
-                            -- Oblicza najblizszy punkt na sciezce wzgledem aktualnej pozycji robota
-                            local l=sim.getClosestPosOnPath(path,pathLengths,sim.getObjectPosition(refHandle))
-                            -- Sprawdza czy idzie w dobrym kierunku
-                            if l<=prevL then
-                                l=l+totalDist/200
-                            end
-                            prevL=l
-                            -- Interpoluje pozycje robota na sciezce
-                            local p=sim.getPathInterpolatedConfig(path,pathLengths,l)
-                            -- Sprawdza, czy istnieje obiekt wizualizacji pozycji sledzenia (trackPosCont) -> jesli tak dodaje nowa pozycje p do wizualizacji
-                            if trackPosCont then
-                                sim.addDrawingObjectItem(trackPosCont,p)
-                            end
-                            
-                            -- Pobiera macierz transformacji
-                            local m=sim.getObjectMatrix(refHandle)
-                            -- Oblicza odwrotnosc macierzy transformacji
-                            m=sim.getMatrixInverse(m)
-                            -- Przeksztalca punkt na sciezce robota do ukladu wspolrzednych robota
-                            p=sim.multiplyVector(m,p)
-                            -- Oblicza kat miedzy osia X a wektorem p
-                            local angle=math.atan2(p[2],p[1])
-                            -- Oblicza wartosci predkosci w zaleznosci od tego czy kat jest dodatni czy ujemny
-                            local leftV=1.0
-                            local rightV=1.0
-                            if angle>0.0 then
-                                leftV=1-8*angle/math.pi
-                                if leftV<-1 then
-                                    leftV=-1
-                                end
-                            else
-                                rightV=1+8*angle/math.pi
-                                if rightV<-1 then
-                                    rightV=-1
-                                end
-                            end
-                            -- Ustawia obliczone predkosci
-                            sim.setJointTargetVelocity(leftMotorHandle,leftV*velocity)
-                            sim.setJointTargetVelocity(rightMotorHandle,rightV*velocity)
-                            sim.step()
-                            
-                            -- Jesli robot znacznie przemiescil sie w kierunku targetu, to breakuje i oblicza nowa trajektorie
-                            local gp2=Vector3(getTargetPosition(target))
-                            local l=(gp2-ogp):norm()
-                            if l>0.1 then
-                                break
-                            end
-                            
-                            -- Jesli pozycja robota jest dostatecznie blisko celu mozna przerwac algorytm
-                            local pp=Vector3(sim.getObjectPosition(refHandle))
-                            local l=(gp2-pp):norm()
-                            if l<0.05 then
-                                break
-                            end
-                        end
-                        if trackPosCont then
-                            sim.removeDrawingObject(trackPosCont)
-                        end
+                    if trackPosCont then
+                        sim.removeDrawingObject(trackPosCont)
                     end
-                    visualizePath()
-                    sim.setJointTargetVelocity(leftMotorHandle,0.0)
-                    sim.setJointTargetVelocity(rightMotorHandle,0.0)
                 end
-                if ngo then
-                    sim.removeModel(ngo)
-                end
-                sim.step()
+                visualizePath()
+                sim.setJointTargetVelocity(leftMotorHandle,0.0)
+                sim.setJointTargetVelocity(rightMotorHandle,0.0)
+            end
+        end
+        state = 2
+        ---------------------------------------------------------------
+        if ngo then
+            sim.removeModel(ngo)
+        end
+        sim.step()
+        sim.pauseSimulation()
+        if state == 2 and target ~= baseHandle
+            target = baseHandle
+            state = 1
+        else
+            state = 0
+        end
     end
 end
-
